@@ -1,0 +1,8 @@
+Fonts bundled with MoneyNest (subsets of the Latin characters):
+
+- Inter, Copyright The Inter Project Authors (https://github.com/rsms/inter)
+- Poppins, Copyright The Poppins Project Authors (https://github.com/itfoundry/poppins)
+
+Both are licensed under the SIL Open Font License, Version 1.1 (https://openfontlicense.org).
+They may be used, bundled and redistributed freely. Bengali text uses the fonts installed on your PC
+(for example Nirmala UI on Windows).

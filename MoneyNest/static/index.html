@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MoneyNest</title>
+  <meta name="theme-color" content="#ffffff">
+  <script>
+    /* apply the saved theme before anything paints (no white flash in dark mode) */
+    (function () {
+      try {
+        var m = localStorage.getItem('mn_theme') || 'light';
+        if (m === 'auto') m = (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', m);
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'light'); }
+    })();
+  </script>
+  <link rel="icon" href="icons/logo.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MoneyNest">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app"></div>
+  <div id="sheet"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <noscript>MoneyNest needs JavaScript.</noscript>
+  <script src="config.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/drive.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
