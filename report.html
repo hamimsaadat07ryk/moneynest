@@ -394,6 +394,13 @@ label.chip { padding: 8px 12px; border-radius: 12px; cursor: pointer; }
 .grid.home { align-items: start; }
 .emoji-row small { flex: 1; }
 .duechips { display: flex; }
+.cb { padding: 6px 0 10px; }
+.cb .cbn { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--ink); }
+.cb .bar { margin: 6px 0 4px; }
+.ins-list { display: flex; flex-direction: column; gap: 10px; }
+.ins { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 14px; background: var(--card-2); border: 1px solid var(--line-2); line-height: 1.4; }
+.ins .emo { font-size: 20px; margin-top: 1px; }
+input[type=file] { padding: 9px !important; background: var(--input); }
 
 /* Monthly report: always light, laid out for A4 paper / PDF */
 html[data-theme] body.report-body { background: #e9edf3; color: #0f172a; }
@@ -1200,6 +1207,52 @@ Object.assign(T.bn, {
   driveLocalOnly: 'শুধু এই ফোনে আছে। Drive যুক্ত করতে ট্যাপ করুন',
   driveSafe: 'প্রতিটি ডিভাইস আপনার Drive-এর "MoneyNest" ফোল্ডারে নিজের ফাইল রাখে এবং অন্যগুলো পড়ে। Drive থেকে কিছুই মোছা হয় না, আর প্রতি মাসে একটি ব্যাকআপ রাখা হয়। ওই ফোল্ডার মুছবেন না।',
   phoneData: 'এই ফোনের ডেটা', phoneDataSafe: 'আপনার এন্ট্রি এই ফোনে থাকে এবং Drive যুক্ত থাকলে সেখানেও কপি হয়। মাঝে মাঝে ব্যাকআপ ফাইল নিয়ে রাখুন।'
+});
+
+/* ---------- version 5: category budgets, trash / restore, insights, Excel ---------- */
+Object.assign(T.en, {
+  amount: 'Amount', total: 'Total', person: 'Person', cancel: 'Cancel',
+  catBudget: 'Monthly budget (optional)', budgetHint: 'Leave empty for no limit. You get a warning at 80% and when you go over.', budgetsTitle: 'Category budgets',
+  budgetLeft: '{a} left', budgetOverBy: 'Over by {a}', budgetNone: 'Set a monthly budget for a category: Settings > Categories > tap a category.',
+  budgetWarn80: '{cat}: {pct}% of its monthly budget used', budgetOver: '{cat}: over its budget by {a}!',
+  alertBudgetOver: '{n} category budget(s) exceeded', alertBudgetNear: '{n} category budget(s) almost used up', alertBudgetSub: 'Tap to see',
+  trashTitle: 'Trash', trashOpen: 'Open Trash', trashEmpty: 'Trash is empty. Deleted entries stay here for 30 days.', trashHelp: 'Deleted entries stay here for 30 days. Tap Restore to bring one back.',
+  restoreBtn: 'Restore', restored: 'Restored', deletedOn: 'Deleted {d}', trashCount: '{n} item(s) in Trash',
+  kind_tx: 'Entry', kind_loan: 'Loan entry', kind_person: 'Person', kind_wish: 'Wish', kind_category: 'Category', kind_account: 'Account', kind_quick: 'Shortcut',
+  restoreFromBackup: 'Restore from a backup', restoreHelp: 'Brings back entries from an earlier backup. Entries you added after that backup are kept.',
+  restoreFile: 'Choose a backup file (.json)', restoreDriveList: 'Backups in Google Drive', restoreNoDrive: 'Connect Google Drive to see its backups.', restoreLoading: 'Loading…',
+  restorePreview: '{n} entries will be brought back from {src}. Entries you added after that backup are kept.', restoreNothing: 'Nothing to restore: this backup matches your data.',
+  restoreConfirm: 'Restore now', restoreDone: '{n} entries restored', restoreBad: 'This file is not a MoneyNest backup.', restoreFail: 'Could not load that backup.',
+  insightsTitle: 'Insights', ins_none: 'Add a few more entries and your insights will appear here.',
+  ins_week_first: 'You spent {a} in the last 7 days.', ins_week_less: 'You spent {a} this week: {b} less than last week ({pct}% down). Great job!',
+  ins_week_more: 'You spent {a} this week: {b} more than last week ({pct}% up).', ins_week_same: 'You spent {a} this week, the same as last week.',
+  ins_cat_up: '{cat} is up {b} compared with last week.', ins_cat_down: '{cat} is down {b} compared with last week.',
+  ins_day: 'You spend the most on {day}s, about {a} each.', ins_proj: 'At this pace you will spend about {a} this month.',
+  ins_proj_ok: 'At this pace you will spend about {a} this month, within your budget.', ins_proj_over: 'At this pace you will spend about {a} this month, {b} over your budget.',
+  ins_big: 'Biggest expense this month: {name} ({a}).',
+  exportXLSX: 'Export Excel (.xlsx)'
+});
+Object.assign(T.bn, {
+  amount: 'পরিমাণ', total: 'মোট', person: 'ব্যক্তি', cancel: 'বাতিল',
+  catBudget: 'মাসিক বাজেট (ঐচ্ছিক)', budgetHint: 'সীমা না চাইলে ফাঁকা রাখুন। ৮০% হলে এবং সীমা পার হলে সতর্কবার্তা পাবেন।', budgetsTitle: 'ক্যাটাগরির বাজেট',
+  budgetLeft: '{a} বাকি', budgetOverBy: '{a} বেশি', budgetNone: 'ক্যাটাগরির মাসিক বাজেট ঠিক করুন: সেটিংস > ক্যাটাগরি > একটি ক্যাটাগরিতে ট্যাপ করুন।',
+  budgetWarn80: '{cat}: মাসিক বাজেটের {pct}% শেষ', budgetOver: '{cat}: বাজেটের চেয়ে {a} বেশি খরচ হয়ে গেছে!',
+  alertBudgetOver: '{n}টি ক্যাটাগরির বাজেট পার হয়েছে', alertBudgetNear: '{n}টি ক্যাটাগরির বাজেট প্রায় শেষ', alertBudgetSub: 'দেখতে ট্যাপ করুন',
+  trashTitle: 'ট্র্যাশ', trashOpen: 'ট্র্যাশ খুলুন', trashEmpty: 'ট্র্যাশ খালি। মুছে ফেলা এন্ট্রি এখানে ৩০ দিন থাকে।', trashHelp: 'মুছে ফেলা এন্ট্রি এখানে ৩০ দিন থাকে। ফিরিয়ে আনতে "ফিরিয়ে আনুন" চাপুন।',
+  restoreBtn: 'ফিরিয়ে আনুন', restored: 'ফিরিয়ে আনা হয়েছে', deletedOn: 'মোছা হয়েছে {d}', trashCount: 'ট্র্যাশে {n}টি আইটেম',
+  kind_tx: 'এন্ট্রি', kind_loan: 'ধারের এন্ট্রি', kind_person: 'ব্যক্তি', kind_wish: 'উইশ', kind_category: 'ক্যাটাগরি', kind_account: 'অ্যাকাউন্ট', kind_quick: 'শর্টকাট',
+  restoreFromBackup: 'ব্যাকআপ থেকে ফিরিয়ে আনুন', restoreHelp: 'আগের ব্যাকআপ থেকে এন্ট্রি ফিরিয়ে আনে। ওই ব্যাকআপের পরে যোগ করা এন্ট্রি থেকে যাবে।',
+  restoreFile: 'ব্যাকআপ ফাইল বেছে নিন (.json)', restoreDriveList: 'Google Drive-এর ব্যাকআপ', restoreNoDrive: 'ব্যাকআপ দেখতে Google Drive যুক্ত করুন।', restoreLoading: 'লোড হচ্ছে…',
+  restorePreview: '{src} থেকে {n}টি এন্ট্রি ফিরিয়ে আনা হবে। ওই ব্যাকআপের পরে যোগ করা এন্ট্রি থেকে যাবে।', restoreNothing: 'ফেরানোর কিছু নেই: এই ব্যাকআপ আপনার ডেটার সাথে মিলে গেছে।',
+  restoreConfirm: 'এখনই ফিরিয়ে আনুন', restoreDone: '{n}টি এন্ট্রি ফিরিয়ে আনা হয়েছে', restoreBad: 'এটি MoneyNest-এর ব্যাকআপ ফাইল নয়।', restoreFail: 'ওই ব্যাকআপ লোড করা যায়নি।',
+  insightsTitle: 'অন্তর্দৃষ্টি', ins_none: 'আরও কিছু এন্ট্রি যোগ করলে এখানে অন্তর্দৃষ্টি দেখা যাবে।',
+  ins_week_first: 'গত ৭ দিনে আপনি {a} খরচ করেছেন।', ins_week_less: 'এই সপ্তাহে {a} খরচ: গত সপ্তাহের চেয়ে {b} কম ({pct}% কম)। দারুণ!',
+  ins_week_more: 'এই সপ্তাহে {a} খরচ: গত সপ্তাহের চেয়ে {b} বেশি ({pct}% বেশি)।', ins_week_same: 'এই সপ্তাহে {a} খরচ, গত সপ্তাহের সমান।',
+  ins_cat_up: 'গত সপ্তাহের তুলনায় {cat} খাতে {b} বেড়েছে।', ins_cat_down: 'গত সপ্তাহের তুলনায় {cat} খাতে {b} কমেছে।',
+  ins_day: 'আপনি সবচেয়ে বেশি খরচ করেন {day}, গড়ে প্রায় {a}।', ins_proj: 'এই গতিতে চললে এই মাসে প্রায় {a} খরচ হবে।',
+  ins_proj_ok: 'এই গতিতে চললে এই মাসে প্রায় {a} খরচ হবে, বাজেটের মধ্যেই।', ins_proj_over: 'এই গতিতে চললে এই মাসে প্রায় {a} খরচ হবে, বাজেটের চেয়ে {b} বেশি।',
+  ins_big: 'এই মাসের সবচেয়ে বড় খরচ: {name} ({a})।',
+  exportXLSX: 'Excel এক্সপোর্ট (.xlsx)'
 });
 
 'use strict';

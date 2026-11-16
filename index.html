@@ -399,6 +399,13 @@ label.chip { padding: 8px 12px; border-radius: 12px; cursor: pointer; }
 .grid.home { align-items: start; }
 .emoji-row small { flex: 1; }
 .duechips { display: flex; }
+.cb { padding: 6px 0 10px; }
+.cb .cbn { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--ink); }
+.cb .bar { margin: 6px 0 4px; }
+.ins-list { display: flex; flex-direction: column; gap: 10px; }
+.ins { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 14px; background: var(--card-2); border: 1px solid var(--line-2); line-height: 1.4; }
+.ins .emo { font-size: 20px; margin-top: 1px; }
+input[type=file] { padding: 9px !important; background: var(--input); }
 </style></head>
 <body><div id="app"></div><div id="sheet"></div><div id="toast" role="status" aria-live="polite"></div>
 <noscript>MoneyNest needs JavaScript.</noscript>
@@ -827,6 +834,251 @@ function exportCSV() {
 
 'use strict';
 /* =====================================================================
+   Extras: category budgets, trash / restore, insights and the Excel (.xlsx) export.
+   (Needs core.js; the text for the screens lives in ui.js / i18n.js.)
+   ===================================================================== */
+
+/* ---------- category budgets ---------- */
+Calc.catSpentMap = function (ym, txs) {
+  const spent = {};
+  (txs || this.txs()).forEach(t => { if (t.type === 'expense' && !t.wishId && monthOf(t.date) === ym) spent[t.cat] = (spent[t.cat] || 0) + +t.amount; });
+  return spent;
+};
+/* level: 0 fine, 1 reached 80%, 2 over the budget */
+Calc.budgetLevel = function (pct) { return pct > 1 ? 2 : pct >= 0.8 ? 1 : 0; };
+Calc.catBudgets = function (ym, txs) {
+  const spent = this.catSpentMap(ym, txs);
+  return this.categories('expense').filter(c => +c.budget > 0).map(c => {
+    const s = spent[c.id] || 0, b = +c.budget, pct = s / b;
+    return { cat: c, budget: b, spent: s, pct, level: this.budgetLevel(pct) };
+  }).sort((a, b) => b.pct - a.pct);
+};
+Calc.catBudgetOne = function (catId, ym) {
+  const c = Store.get('category', catId); if (!c || !(+c.budget > 0)) return null;
+  const s = this.catSpentMap(ym)[catId] || 0, pct = s / +c.budget;
+  return { cat: c, budget: +c.budget, spent: s, pct, level: this.budgetLevel(pct) };
+};
+
+/* ---------- trash: deleted entries stay for 30 days and can be brought back ---------- */
+const Trash = {
+  days: 30,
+  kinds: ['tx', 'loan', 'person', 'wish', 'category', 'account', 'quick'],
+  list() {
+    const cutoff = Date.now() - this.days * 86400000, out = [];
+    for (const key in Store.d.records) {
+      const r = Store.d.records[key];
+      if (r.deleted && this.kinds.includes(r.kind) && r.updated_at > cutoff && r.updated_at > 1e12) out.push({ key, kind: r.kind, id: r.id, data: r.data, ts: r.updated_at });
+    }
+    return out.sort((a, b) => b.ts - a.ts);
+  },
+  count() { return this.list().length; },
+  restore(kind, id) {
+    const r = Store.d.records[kind + ':' + id]; if (!r || !r.deleted) return;
+    const delTs = r.updated_at;
+    Store.put(kind, id, r.data);
+    // things that were deleted together with it come back too
+    for (const key in Store.d.records) {
+      const o = Store.d.records[key];
+      if (!o.deleted || Math.abs(o.updated_at - delTs) > 120000) continue;
+      if (kind === 'person' && o.kind === 'loan' && o.data.personId === id) Store.put('loan', o.id, o.data);
+      if (kind === 'wish' && o.kind === 'wishsave' && o.data.wishId === id) Store.put('wishsave', o.id, o.data);
+      if (kind === 'tx' && o.kind === 'wishsave' && o.data.txId === id) Store.put('wishsave', o.id, o.data);
+    }
+  }
+};
+
+/* ---------- restore from a backup (a Drive backup file or a file you exported) ---------- */
+const Restore = {
+  /* accepts {records:{key:rec}}, {records:[rec,...]} or a plain list */
+  normalize(j) {
+    let recs = j && j.records !== undefined ? j.records : j;
+    if (Array.isArray(recs)) { const m = {}; recs.forEach(r => { if (r && r.kind && r.id) m[r.kind + ':' + r.id] = r; }); recs = m; }
+    return recs && typeof recs === 'object' ? recs : {};
+  },
+  /* what would change: records that are missing, deleted, or different now */
+  plan(j) {
+    const recs = this.normalize(j), keys = [];
+    for (const key in recs) {
+      const r = recs[key];
+      if (!r || typeof r.kind !== 'string' || typeof r.id !== 'string' || !r.data || typeof r.data !== 'object' || r.deleted) continue;
+      if (key !== r.kind + ':' + r.id) continue;
+      const loc = Store.d.records[key];
+      if (!loc || loc.deleted || JSON.stringify(loc.data) !== JSON.stringify(r.data)) keys.push([key, r]);
+    }
+    return { recs, items: keys, count: keys.length };
+  },
+  /* entries made after the backup are kept; restored ones become the newest version */
+  apply(plan) { plan.items.forEach(([key, r]) => Store.put(r.kind, r.id, r.data)); return plan.count; }
+};
+
+/* ---------- insights ---------- */
+Calc.insights = function () {
+  const txs = this.txs(), out = [], today = todayISO();
+  const ex = txs.filter(t => t.type === 'expense' && !t.wishId);
+  if (!ex.length) return out;
+  const ago = n => { const d = new Date(); d.setDate(d.getDate() - n); return isoDate(d); };
+  const w0 = ago(6), p0 = ago(13), p1 = ago(7);
+  const thisW = ex.filter(t => t.date >= w0 && t.date <= today), prevW = ex.filter(t => t.date >= p0 && t.date <= p1);
+  const sum = a => a.reduce((s, t) => s + +t.amount, 0);
+  const a = sum(thisW), b = sum(prevW);
+  if (a > 0 || b > 0) {
+    if (b === 0) out.push({ e: '📅', k: 'ins_week_first', p: { a } });
+    else if (a < b) out.push({ e: '🎉', k: 'ins_week_less', p: { a, b: b - a, pct: Math.round((b - a) / b * 100) } });
+    else if (a > b) out.push({ e: '📈', k: 'ins_week_more', p: { a, b: a - b, pct: Math.round((a - b) / b * 100) } });
+    else out.push({ e: '⚖️', k: 'ins_week_same', p: { a } });
+  }
+  // the category that changed most since last week
+  const byCat = arr => { const m = {}; arr.forEach(t => { m[t.cat] = (m[t.cat] || 0) + +t.amount; }); return m; };
+  const cw = byCat(thisW), cp = byCat(prevW), cats = Object.fromEntries(Store.list('category').map(c => [c.id, c]));
+  let best = null;
+  Object.keys(Object.assign({}, cw, cp)).forEach(id => {
+    const d = (cw[id] || 0) - (cp[id] || 0);
+    if (!best || Math.abs(d) > Math.abs(best.d)) best = { id, d };
+  });
+  if (best && Math.abs(best.d) >= 100 && cats[best.id]) out.push({ e: best.d > 0 ? '🔺' : '🔻', k: best.d > 0 ? 'ins_cat_up' : 'ins_cat_down', p: { cat: cats[best.id], b: Math.abs(best.d) } });
+  // the weekday you spend most on (needs two weeks of history)
+  const first = txs.map(t => t.date).sort()[0];
+  if (first && first <= ago(14)) {
+    const from = ago(55), sums = [0, 0, 0, 0, 0, 0, 0];
+    ex.filter(t => t.date >= from && t.date <= today).forEach(t => { sums[new Date(t.date + 'T00:00:00').getDay()] += +t.amount; });
+    let top = 0; sums.forEach((v, i) => { if (v > sums[top]) top = i; });
+    if (sums[top] > 0) out.push({ e: '🗓️', k: 'ins_day', p: { dow: top, a: sums[top] / 8 } });
+  }
+  // this month: projection and the biggest single expense
+  const ym = curMonth(), mex = ex.filter(t => monthOf(t.date) === ym), elapsed = +today.slice(8, 10), dim = daysInMonth(ym);
+  const spent = sum(mex), budget = +this.settings().monthlyBudget || 0;
+  if (spent > 0 && elapsed >= 5) {
+    const proj = Math.round(spent / elapsed * dim);
+    if (budget > 0) out.push(proj > budget ? { e: '🚨', k: 'ins_proj_over', p: { a: proj, b: proj - budget } } : { e: '✅', k: 'ins_proj_ok', p: { a: proj } });
+    else out.push({ e: '🔮', k: 'ins_proj', p: { a: proj } });
+  }
+  if (mex.length) {
+    const big = mex.slice().sort((x, y) => y.amount - x.amount)[0];
+    out.push({ e: '💎', k: 'ins_big', p: { name: big.note || (cats[big.cat] ? cats[big.cat].name : ''), a: +big.amount, cat: cats[big.cat] } });
+  }
+  return out.slice(0, 5);
+};
+
+/* ---------- Excel (.xlsx) export: hand-built, no libraries ---------- */
+const XLSX = (() => {
+  const enc = new TextEncoder();
+  const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  const crc32 = u8 => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = crcT[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  /* a zip file that stores (does not compress) its files */
+  const zip = files => {
+    const parts = [], central = []; let off = 0;
+    const u16 = v => [v & 255, (v >>> 8) & 255], u32 = v => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+    files.forEach(f => {
+      const name = enc.encode(f.name), data = typeof f.data === 'string' ? enc.encode(f.data) : f.data, crc = crc32(data);
+      const head = new Uint8Array([0x50, 0x4b, 3, 4, ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0)]);
+      parts.push(head, name, data);
+      central.push(new Uint8Array([0x50, 0x4b, 1, 2, ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(off)]), name);
+      off += head.length + name.length + data.length;
+    });
+    const cLen = central.reduce((s, p) => s + p.length, 0);
+    parts.push(...central, new Uint8Array([0x50, 0x4b, 5, 6, 0, 0, 0, 0, ...u16(files.length), ...u16(files.length), ...u32(cLen), ...u32(off), 0, 0]));
+    const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; parts.forEach(p => { out.set(p, o); o += p.length; });
+    return out;
+  };
+  const esc = s => String(s).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const col = i => { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+  const serial = iso => Math.round((Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) - Date.UTC(1899, 11, 30)) / 86400000);
+  /* styles: 0 normal, 1 header, 2 date, 3 money, 4 total label, 5 total money */
+  const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy\\-mm\\-dd"/><numFmt numFmtId="165" formatCode="#,##0.00"/></numFmts>' +
+    '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>' +
+    '<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F9D8A"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE6F6F3"/></patternFill></fill></fills>' +
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
+    '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
+    '<xf numFmtId="0" fontId="1" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="165" fontId="1" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/></cellXfs>' +
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+  /* cell: string | number | {d:'YYYY-MM-DD'} | {f:'SUM(..)', v:number, s:5} | {t:'text', s:4} | null */
+  const cellXML = (c, r, ci) => {
+    if (c === null || c === undefined || c === '') return '';
+    const ref = col(ci) + (r + 1);
+    if (typeof c === 'number') return '<c r="' + ref + '" s="3"><v>' + c + '</v></c>';
+    if (typeof c === 'string') return '<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' + esc(c) + '</t></is></c>';
+    if (c.n !== undefined) return '<c r="' + ref + '"><v>' + c.n + '</v></c>';
+    if (c.d) return '<c r="' + ref + '" s="2"><v>' + serial(c.d) + '</v></c>';
+    if (c.f) return '<c r="' + ref + '" s="' + (c.s || 3) + '"><f>' + esc(c.f) + '</f><v>' + (+c.v || 0) + '</v></c>';
+    if (c.h) return '<c r="' + ref + '" s="1" t="inlineStr"><is><t xml:space="preserve">' + esc(c.h) + '</t></is></c>';
+    if (c.t !== undefined) return '<c r="' + ref + '" s="' + (c.s || 4) + '" t="inlineStr"><is><t xml:space="preserve">' + esc(c.t) + '</t></is></c>';
+    return '';
+  };
+  /* sheets: [{name, rows:[[cell,...]], widths:[..]}]; row 0 is the header */
+  const build = sheets => {
+    const used = {}, names = sheets.map(s => { let n = String(s.name).replace(/[\[\]:*?\/\\]/g, ' ').trim().slice(0, 31) || 'Sheet'; let k = n, i = 2; while (used[k.toLowerCase()]) k = n.slice(0, 28) + ' ' + i++; used[k.toLowerCase()] = 1; return k; });
+    const files = [
+      { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' + sheets.map((s, i) => '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>').join('') + '</Types>' },
+      { name: '_rels/.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>' },
+      { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + names.map((n, i) => '<sheet name="' + esc(n).replace(/"/g, '&quot;') + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>').join('') + '</sheets></workbook>' },
+      { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + sheets.map((s, i) => '<Relationship Id="rId' + (i + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>').join('') + '<Relationship Id="rId' + (sheets.length + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' },
+      { name: 'xl/styles.xml', data: STYLES }
+    ];
+    sheets.forEach((s, i) => {
+      const rows = s.rows.map((row, r) => '<row r="' + (r + 1) + '">' + row.map((c, ci) => (r === 0 && typeof c === 'string') ? cellXML({ h: c }, r, ci) : cellXML(c, r, ci)).join('') + '</row>').join('');
+      files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>' + (s.widths || []).map((w, k) => '<col min="' + (k + 1) + '" max="' + (k + 1) + '" width="' + w + '" customWidth="1"/>').join('') + '</cols><sheetData>' + rows + '</sheetData></worksheet>' });
+    });
+    return zip(files);
+  };
+  return { build, zip, crc32 };
+})();
+
+/* builds the workbook from the app data: Summary, By category, one sheet per month, Loans */
+function buildWorkbook(tr) {
+  tr = tr || (k => k);
+  const txs = Calc.txs().sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  const cats = Object.fromEntries(Store.list('category').map(c => [c.id, c])), accs = Object.fromEntries(Calc.accounts().map(a => [a.id, a]));
+  const N = o => (o ? nm(o) : '');
+  const months = Array.from(new Set(txs.map(t => monthOf(t.date)))).sort();
+  const sheets = [];
+  // Summary
+  const sum = [[tr('rep_months'), tr('deposits'), tr('expenses'), tr('rep_net'), tr('transactions')]];
+  months.forEach((m, i) => { const s = Calc.monthStats(txs, m), r = i + 2; sum.push([m, s.income, s.expenseAll, { f: 'B' + r + '-C' + r, v: s.saved }, { n: txs.filter(t => monthOf(t.date) === m).length }]); });
+  if (months.length) { const n = months.length + 1, all = Calc.monthStats(txs, null); sum.push([{ t: tr('total') }, { f: 'SUM(B2:B' + n + ')', v: txs.filter(t => t.type === 'income').reduce((s, t) => s + +t.amount, 0), s: 5 }, { f: 'SUM(C2:C' + n + ')', v: txs.filter(t => t.type === 'expense').reduce((s, t) => s + +t.amount, 0), s: 5 }, { f: 'B' + (n + 1) + '-C' + (n + 1), v: txs.filter(t => t.type === 'income').reduce((s, t) => s + +t.amount, 0) - txs.filter(t => t.type === 'expense').reduce((s, t) => s + +t.amount, 0), s: 5 }, { f: 'SUM(E2:E' + n + ')', v: txs.length, s: 4 }]); }
+  sheets.push({ name: tr('rep_overview'), rows: sum, widths: [14, 16, 16, 16, 14] });
+  // By category (expenses)
+  const ecats = Calc.categories('expense');
+  const bc = [[tr('category')].concat(months, [tr('total')])];
+  ecats.forEach((c, i) => {
+    const r = i + 2, row = [N(c)];
+    months.forEach(m => row.push(txs.filter(t => t.type === 'expense' && t.cat === c.id && monthOf(t.date) === m).reduce((s, t) => s + +t.amount, 0)));
+    row.push({ f: months.length ? 'SUM(B' + r + ':' + col2(months.length) + r + ')' : '0', v: txs.filter(t => t.type === 'expense' && t.cat === c.id).reduce((s, t) => s + +t.amount, 0), s: 3 });
+    bc.push(row);
+  });
+  sheets.push({ name: tr('rep_topcat'), rows: bc, widths: [22].concat(months.map(() => 13), [14]) });
+  // one sheet per month
+  months.slice().reverse().forEach(m => {
+    const rows = [[tr('date'), tr('type'), tr('category'), tr('account'), tr('note'), tr('deposits'), tr('expenses'), tr('type_transfer')]];
+    let a = 0, b = 0, c = 0;
+    txs.filter(t => monthOf(t.date) === m).forEach(t => {
+      const isT = t.type === 'transfer', amt = +t.amount;
+      if (t.type === 'income') a += amt; else if (t.type === 'expense') b += amt; else c += amt;
+      rows.push([{ d: t.date }, isT ? tr('type_transfer') : t.type === 'income' ? tr('type_income') : tr('type_expense'), isT ? N(accs[t.account]) + ' → ' + N(accs[t.to]) : N(cats[t.cat]), isT ? '' : N(accs[t.account]), t.note || '', t.type === 'income' ? amt : null, t.type === 'expense' ? amt : null, isT ? amt : null]);
+    });
+    const n = rows.length;
+    rows.push([{ t: tr('total') }, { t: '' }, { t: '' }, { t: '' }, { t: '' }, { f: 'SUM(F2:F' + n + ')', v: a, s: 5 }, { f: 'SUM(G2:G' + n + ')', v: b, s: 5 }, { f: 'SUM(H2:H' + n + ')', v: c, s: 5 }]);
+    sheets.push({ name: m, rows, widths: [12, 12, 24, 14, 30, 14, 14, 14] });
+  });
+  // Loans
+  const people = Object.fromEntries(Calc.people().map(p => [p.id, p])), lab = { lend: tr('loan_lend'), back: tr('loan_back'), borrow: tr('loan_borrow'), pay: tr('loan_pay') };
+  const ln = [[tr('personId'), tr('person'), tr('date'), tr('type'), tr('amount'), tr('account'), tr('dueDate'), tr('note')]];
+  Calc.loans().sort((x, y) => x.date.localeCompare(y.date)).forEach(l => { const p = people[l.personId] || {}; ln.push([p.code || '', p.name || '', { d: l.date }, lab[l.kind] || l.kind, +l.amount, N(accs[l.account]), l.due ? { d: l.due } : '', l.note || '']); });
+  sheets.push({ name: tr('lendBorrow'), rows: ln, widths: [11, 20, 12, 20, 14, 14, 12, 30] });
+  return XLSX.build(sheets);
+}
+function col2(i) { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; }
+function exportXLSX(tr) {
+  const u8 = buildWorkbook(tr);
+  const blob = new Blob([u8], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'moneynest-' + todayISO() + '.xlsx';
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
+}
+
+'use strict';
+/* =====================================================================
    Tiny SVG chart helpers (no external libraries, work fully offline)
    ===================================================================== */
 const COLORS = {
@@ -1156,6 +1408,52 @@ Object.assign(T.bn, {
   phoneData: 'এই ফোনের ডেটা', phoneDataSafe: 'আপনার এন্ট্রি এই ফোনে থাকে এবং Drive যুক্ত থাকলে সেখানেও কপি হয়। মাঝে মাঝে ব্যাকআপ ফাইল নিয়ে রাখুন।'
 });
 
+/* ---------- version 5: category budgets, trash / restore, insights, Excel ---------- */
+Object.assign(T.en, {
+  amount: 'Amount', total: 'Total', person: 'Person', cancel: 'Cancel',
+  catBudget: 'Monthly budget (optional)', budgetHint: 'Leave empty for no limit. You get a warning at 80% and when you go over.', budgetsTitle: 'Category budgets',
+  budgetLeft: '{a} left', budgetOverBy: 'Over by {a}', budgetNone: 'Set a monthly budget for a category: Settings > Categories > tap a category.',
+  budgetWarn80: '{cat}: {pct}% of its monthly budget used', budgetOver: '{cat}: over its budget by {a}!',
+  alertBudgetOver: '{n} category budget(s) exceeded', alertBudgetNear: '{n} category budget(s) almost used up', alertBudgetSub: 'Tap to see',
+  trashTitle: 'Trash', trashOpen: 'Open Trash', trashEmpty: 'Trash is empty. Deleted entries stay here for 30 days.', trashHelp: 'Deleted entries stay here for 30 days. Tap Restore to bring one back.',
+  restoreBtn: 'Restore', restored: 'Restored', deletedOn: 'Deleted {d}', trashCount: '{n} item(s) in Trash',
+  kind_tx: 'Entry', kind_loan: 'Loan entry', kind_person: 'Person', kind_wish: 'Wish', kind_category: 'Category', kind_account: 'Account', kind_quick: 'Shortcut',
+  restoreFromBackup: 'Restore from a backup', restoreHelp: 'Brings back entries from an earlier backup. Entries you added after that backup are kept.',
+  restoreFile: 'Choose a backup file (.json)', restoreDriveList: 'Backups in Google Drive', restoreNoDrive: 'Connect Google Drive to see its backups.', restoreLoading: 'Loading…',
+  restorePreview: '{n} entries will be brought back from {src}. Entries you added after that backup are kept.', restoreNothing: 'Nothing to restore: this backup matches your data.',
+  restoreConfirm: 'Restore now', restoreDone: '{n} entries restored', restoreBad: 'This file is not a MoneyNest backup.', restoreFail: 'Could not load that backup.',
+  insightsTitle: 'Insights', ins_none: 'Add a few more entries and your insights will appear here.',
+  ins_week_first: 'You spent {a} in the last 7 days.', ins_week_less: 'You spent {a} this week: {b} less than last week ({pct}% down). Great job!',
+  ins_week_more: 'You spent {a} this week: {b} more than last week ({pct}% up).', ins_week_same: 'You spent {a} this week, the same as last week.',
+  ins_cat_up: '{cat} is up {b} compared with last week.', ins_cat_down: '{cat} is down {b} compared with last week.',
+  ins_day: 'You spend the most on {day}s, about {a} each.', ins_proj: 'At this pace you will spend about {a} this month.',
+  ins_proj_ok: 'At this pace you will spend about {a} this month, within your budget.', ins_proj_over: 'At this pace you will spend about {a} this month, {b} over your budget.',
+  ins_big: 'Biggest expense this month: {name} ({a}).',
+  exportXLSX: 'Export Excel (.xlsx)'
+});
+Object.assign(T.bn, {
+  amount: 'পরিমাণ', total: 'মোট', person: 'ব্যক্তি', cancel: 'বাতিল',
+  catBudget: 'মাসিক বাজেট (ঐচ্ছিক)', budgetHint: 'সীমা না চাইলে ফাঁকা রাখুন। ৮০% হলে এবং সীমা পার হলে সতর্কবার্তা পাবেন।', budgetsTitle: 'ক্যাটাগরির বাজেট',
+  budgetLeft: '{a} বাকি', budgetOverBy: '{a} বেশি', budgetNone: 'ক্যাটাগরির মাসিক বাজেট ঠিক করুন: সেটিংস > ক্যাটাগরি > একটি ক্যাটাগরিতে ট্যাপ করুন।',
+  budgetWarn80: '{cat}: মাসিক বাজেটের {pct}% শেষ', budgetOver: '{cat}: বাজেটের চেয়ে {a} বেশি খরচ হয়ে গেছে!',
+  alertBudgetOver: '{n}টি ক্যাটাগরির বাজেট পার হয়েছে', alertBudgetNear: '{n}টি ক্যাটাগরির বাজেট প্রায় শেষ', alertBudgetSub: 'দেখতে ট্যাপ করুন',
+  trashTitle: 'ট্র্যাশ', trashOpen: 'ট্র্যাশ খুলুন', trashEmpty: 'ট্র্যাশ খালি। মুছে ফেলা এন্ট্রি এখানে ৩০ দিন থাকে।', trashHelp: 'মুছে ফেলা এন্ট্রি এখানে ৩০ দিন থাকে। ফিরিয়ে আনতে "ফিরিয়ে আনুন" চাপুন।',
+  restoreBtn: 'ফিরিয়ে আনুন', restored: 'ফিরিয়ে আনা হয়েছে', deletedOn: 'মোছা হয়েছে {d}', trashCount: 'ট্র্যাশে {n}টি আইটেম',
+  kind_tx: 'এন্ট্রি', kind_loan: 'ধারের এন্ট্রি', kind_person: 'ব্যক্তি', kind_wish: 'উইশ', kind_category: 'ক্যাটাগরি', kind_account: 'অ্যাকাউন্ট', kind_quick: 'শর্টকাট',
+  restoreFromBackup: 'ব্যাকআপ থেকে ফিরিয়ে আনুন', restoreHelp: 'আগের ব্যাকআপ থেকে এন্ট্রি ফিরিয়ে আনে। ওই ব্যাকআপের পরে যোগ করা এন্ট্রি থেকে যাবে।',
+  restoreFile: 'ব্যাকআপ ফাইল বেছে নিন (.json)', restoreDriveList: 'Google Drive-এর ব্যাকআপ', restoreNoDrive: 'ব্যাকআপ দেখতে Google Drive যুক্ত করুন।', restoreLoading: 'লোড হচ্ছে…',
+  restorePreview: '{src} থেকে {n}টি এন্ট্রি ফিরিয়ে আনা হবে। ওই ব্যাকআপের পরে যোগ করা এন্ট্রি থেকে যাবে।', restoreNothing: 'ফেরানোর কিছু নেই: এই ব্যাকআপ আপনার ডেটার সাথে মিলে গেছে।',
+  restoreConfirm: 'এখনই ফিরিয়ে আনুন', restoreDone: '{n}টি এন্ট্রি ফিরিয়ে আনা হয়েছে', restoreBad: 'এটি MoneyNest-এর ব্যাকআপ ফাইল নয়।', restoreFail: 'ওই ব্যাকআপ লোড করা যায়নি।',
+  insightsTitle: 'অন্তর্দৃষ্টি', ins_none: 'আরও কিছু এন্ট্রি যোগ করলে এখানে অন্তর্দৃষ্টি দেখা যাবে।',
+  ins_week_first: 'গত ৭ দিনে আপনি {a} খরচ করেছেন।', ins_week_less: 'এই সপ্তাহে {a} খরচ: গত সপ্তাহের চেয়ে {b} কম ({pct}% কম)। দারুণ!',
+  ins_week_more: 'এই সপ্তাহে {a} খরচ: গত সপ্তাহের চেয়ে {b} বেশি ({pct}% বেশি)।', ins_week_same: 'এই সপ্তাহে {a} খরচ, গত সপ্তাহের সমান।',
+  ins_cat_up: 'গত সপ্তাহের তুলনায় {cat} খাতে {b} বেড়েছে।', ins_cat_down: 'গত সপ্তাহের তুলনায় {cat} খাতে {b} কমেছে।',
+  ins_day: 'আপনি সবচেয়ে বেশি খরচ করেন {day}, গড়ে প্রায় {a}।', ins_proj: 'এই গতিতে চললে এই মাসে প্রায় {a} খরচ হবে।',
+  ins_proj_ok: 'এই গতিতে চললে এই মাসে প্রায় {a} খরচ হবে, বাজেটের মধ্যেই।', ins_proj_over: 'এই গতিতে চললে এই মাসে প্রায় {a} খরচ হবে, বাজেটের চেয়ে {b} বেশি।',
+  ins_big: 'এই মাসের সবচেয়ে বড় খরচ: {name} ({a})।',
+  exportXLSX: 'Excel এক্সপোর্ট (.xlsx)'
+});
+
 'use strict';
 /* =====================================================================
    Google Drive sync (optional).
@@ -1252,6 +1550,16 @@ const Drive = {
   },
   async download(id, tok) { const r = await this.call('/drive/v3/files/' + id + '?alt=media', {}, tok); return r.json(); },
 
+  /* ---------- backups (for "Restore from a backup") ---------- */
+  async listBackups() {
+    const tok = await this.token(true);
+    const folders = await this.list("name = 'MoneyNest' and mimeType = 'application/vnd.google-apps.folder' and trashed = false", 'id', tok);
+    let out = [];
+    for (const f of folders) out.push(...await this.list("'" + f.id + "' in parents and trashed = false", 'id,name,modifiedTime', tok));
+    return out.filter(f => /^moneynest-backup-.+\.json$/.test(f.name)).sort((a, b) => b.name.localeCompare(a.name));
+  },
+  async loadBackup(id) { const tok = await this.token(true); return this.download(id, tok); },
+
   /* ---------- merge ---------- */
   mergeIn(records) {
     let touched = 0;
@@ -1317,9 +1625,11 @@ const Drive = {
         Store.d.driveSig = sig;
       }
       // 4. one permanent backup per month (created once, never changed or deleted)
-      const bk = 'moneynest-backup-' + curMonth() + '.json';
-      if (!files.some(f => f.name === bk)) {
-        await this.upload({ name: bk, parents: [home], mimeType: 'application/json' }, { app: 'MoneyNest', version: 1, savedAt: Date.now(), records: Store.d.records }, tok);
+      const wd = new Date(); wd.setDate(wd.getDate() - ((wd.getDay() + 6) % 7)); // Monday of this week
+      for (const bk of ['moneynest-backup-' + curMonth() + '.json', 'moneynest-backup-' + isoDate(wd) + '.json']) {
+        if (!files.some(f => f.name === bk)) {
+          await this.upload({ name: bk, parents: [home], mimeType: 'application/json' }, { app: 'MoneyNest', version: 1, savedAt: Date.now(), records: Store.d.records }, tok);
+        }
       }
       Store.d.driveLast = Date.now(); Store.d.driveOn = 1;
       Store.save();
@@ -1537,12 +1847,12 @@ const UI = {
     const next = this.month < curMonth();
     return '<div class="monthnav"><button data-act="mPrev" aria-label="Previous month">' + ic('chevL', 18) + '</button><span>' + esc(fmtMonth(this.month)) + '</span><button data-act="mNext" ' + (next ? '' : 'disabled') + ' aria-label="Next month">' + ic('chevR', 18) + '</button></div>';
   },
-  toast(msg, label, fn) {
+  toast(msg, label, fn, ms) {
     const el = $('#toast'); if (!el) return;
     this._toastFn = fn || null;
     el.innerHTML = '<span>' + esc(msg) + '</span>' + (fn ? '<button data-act="toastAction">' + esc(label) + '</button>' : '');
     el.classList.add('show');
-    clearTimeout(this._tt); this._tt = setTimeout(() => { el.classList.remove('show'); this._toastFn = null; }, fn ? 5000 : 2600);
+    clearTimeout(this._tt); this._tt = setTimeout(() => { el.classList.remove('show'); this._toastFn = null; }, ms || (fn ? 5000 : 2600));
   },
 
   /* ------------------------------------------------------------ rows */
@@ -1642,7 +1952,69 @@ const UI = {
       (qs.length ? '<div class="qa-list">' + qs.map(q => '<div class="qa-item"><div class="qa-top"><span class="emo">' + esc(q.emoji || '💸') + '</span><span>' + esc(nm(q)) + '</span><span class="badge">' + esc(nm(catMap[q.cat]) || t('cat_deleted')) + '</span></div><div class="qa-amts">' +
         q.amounts.map(a => '<button class="qa-amt" data-act="quickAdd" data-q="' + esc(q.id) + '" data-a="' + a + '">' + money(a) + '</button>').join('') +
         '<button class="qa-amt other" data-act="quickOther" data-q="' + esc(q.id) + '">' + t('other') + '</button></div></div>').join('') + '</div>' : '<p class="qa-empty">' + t('noQuick') + '</p>') + '</section>';
-    return '<div class="home-top">' + greet + alerts + '</div><div class="grid home">' + h + quick + dl + mb + stats + chart + lc + rec + '</div>';
+    const cbs = Calc.catBudgets(ym, txs), bOver = cbs.filter(x => x.level === 2).length, bNear = cbs.filter(x => x.level === 1).length;
+    const bAlert = (cls, emo, txt) => '<button class="alert' + cls + '" data-act="goBudget"><span class="emo">' + emo + '</span><span>' + txt + '<small>' + t('alertBudgetSub') + '</small></span></button>';
+    const alerts2 = alerts + (bOver ? bAlert('', '🚨', t('alertBudgetOver').replace('{n}', localDigits(bOver))) : '') + (bNear ? bAlert(' soon', '⚠️', t('alertBudgetNear').replace('{n}', localDigits(bNear))) : '');
+    return '<div class="home-top">' + greet + alerts2 + '</div><div class="grid home">' + h + quick + dl + mb + this.budgetCard(ym, txs) + this.insightsCard() + stats + chart + lc + rec + '</div>';
+  },
+  /* a warning when an entry pushes a category over 80% or over its monthly budget */
+  budgetMsg(catId, date, before) {
+    const after = Calc.catBudgetOne(catId, monthOf(date)); if (!after) return '';
+    if (after.level <= (before ? before.level : 0)) return '';
+    return (after.level === 2 ? t('budgetOver').replace('{a}', money(after.spent - after.budget)) : t('budgetWarn80').replace('{pct}', localDigits(Math.round(after.pct * 100)))).replace('{cat}', nm(after.cat));
+  },
+  budgetCard(ym, txs) {
+    const cbs = Calc.catBudgets(ym, txs);
+    const rows = cbs.map(x => {
+      const col = x.level === 2 ? COLORS.expense : x.level === 1 ? COLORS.warn : COLORS.brand;
+      const left = x.budget - x.spent;
+      return '<div class="cb"><div class="kv"><span class="cbn"><span class="ico xs" style="background:' + tint(x.cat.color) + ';color:' + x.cat.color + '">' + iconHTML(x.cat, 14) + '</span>' + esc(nm(x.cat)) + '</span><b>' + money(x.spent) + ' / ' + money(x.budget) + '</b></div>' +
+        '<div class="bar"><i style="width:' + Math.min(100, x.pct * 100).toFixed(1) + '%;background:' + col + ';color:' + col + '"></i></div>' +
+        '<small class="' + (x.level === 2 ? 'neg' : '') + '">' + (left >= 0 ? t('budgetLeft').replace('{a}', money(left)) : t('budgetOverBy').replace('{a}', money(-left))) + ' · ' + localDigits(Math.round(x.pct * 100)) + '%</small></div>';
+    }).join('');
+    return '<section class="card" id="budgetcard"><div class="card-h"><h3><span class="emo">🎯</span> ' + t('budgetsTitle') + '</h3><span class="muted">' + esc(fmtMonth(ym)) + '</span></div>' +
+      (rows || '<p class="muted">' + t('budgetNone') + '</p><button class="btn" data-act="go" data-p="settings">' + ic('settings', 18) + ' ' + t('settings') + '</button>') + '</section>';
+  },
+  insightsCard() {
+    const list = Calc.insights();
+    const fill = x => {
+      let s = t(x.k), p = x.p || {};
+      const rep = { '{a}': p.a !== undefined ? money(p.a) : '', '{b}': p.b !== undefined ? money(p.b) : '', '{pct}': p.pct !== undefined ? localDigits(p.pct) : '', '{cat}': p.cat ? nm(p.cat) : '', '{name}': p.name || '', '{day}': p.dow !== undefined ? new Date(2024, 0, 7 + p.dow).toLocaleDateString(locale(), { weekday: 'long' }) : '' };
+      Object.keys(rep).forEach(k => { s = s.split(k).join(rep[k]); });
+      return s;
+    };
+    return '<section class="card"><div class="card-h"><h3><span class="emo">💡</span> ' + t('insightsTitle') + '</h3></div>' +
+      (list.length ? '<div class="ins-list">' + list.map(x => '<div class="ins"><span class="emo">' + x.e + '</span><span>' + esc(fill(x)) + '</span></div>').join('') + '</div>' : '<p class="muted">' + t('ins_none') + '</p>') + '</section>';
+  },
+  trashSheet() {
+    const list = Trash.list();
+    const lab = { lend: t('loan_lend'), back: t('loan_back'), borrow: t('loan_borrow'), pay: t('loan_pay') };
+    const rows = list.map(it => {
+      const d = it.data; let title = d.note || '', sub = t('kind_' + it.kind), amt = '', emo = '🗑️';
+      if (it.kind === 'tx') { const c = Store.d.records['category:' + d.cat]; title = d.note || (c ? nm(c.data) : '') || t('kind_tx'); sub += ' · ' + fmtDate(d.date); amt = money(d.amount); emo = (c && emojiOf(Object.assign({ id: d.cat }, c.data))) || '💸'; }
+      else if (it.kind === 'loan') { const p = Store.d.records['person:' + d.personId]; title = lab[d.kind] || d.kind; sub += ' · ' + (p ? p.data.name : '') + ' · ' + fmtDate(d.date); amt = money(d.amount); emo = '🤝'; }
+      else if (it.kind === 'person') { title = d.name; sub += ' · ' + (d.code || ''); emo = '👤'; }
+      else { title = nm(d) || d.name || ''; emo = (it.kind === 'wish' ? (d.emoji || '🎁') : it.kind === 'quick' ? (d.emoji || '⚡') : emojiOf(Object.assign({ id: it.id }, d)) || '📁'); }
+      return '<div class="row"><span class="ico"><span class="emo">' + esc(emo) + '</span></span><span class="row-main"><b>' + esc(title) + '</b><small>' + esc(sub) + ' · ' + t('deletedOn').replace('{d}', esc(fmtDate(isoDate(new Date(it.ts))))) + '</small></span>' + (amt ? '<span class="amt">' + amt + '</span>' : '') + '<button class="btn sm" data-act="restoreItem" data-k="' + it.kind + '" data-id="' + esc(it.id) + '">' + t('restoreBtn') + '</button></div>';
+    }).join('');
+    this.sheet(t('trashTitle'), '<p class="muted xs">' + t('trashHelp') + '</p>' + (rows ? '<div class="rows">' + rows + '</div>' : '<div class="empty-state"><span class="big-emo">🗑️</span><p>' + t('trashEmpty') + '</p></div>'));
+  },
+  restoreSheet() {
+    const drv = Drive.clientId() && Store.d.driveOn;
+    this.sheet(t('restoreFromBackup'), '<p class="muted xs">' + t('restoreHelp') + '</p>' +
+      '<label class="field"><span>' + t('restoreFile') + '</span><input type="file" accept=".json,application/json" data-file="restore"></label>' +
+      '<h4>' + t('restoreDriveList') + '</h4><div id="restoreDrive" class="rows">' + (drv ? '<p class="muted">' + t('restoreLoading') + '</p>' : '<p class="muted">' + t('restoreNoDrive') + '</p>') + '</div>');
+    if (drv) Drive.listBackups().then(list => {
+      const el = $('#restoreDrive'); if (!el) return;
+      el.innerHTML = list.length ? list.map(f => '<button class="row" data-act="restoreDrive" data-id="' + esc(f.id) + '" data-name="' + esc(f.name) + '"><span class="ico"><span class="emo">☁️</span></span><span class="row-main"><b>' + esc(f.name.replace(/^moneynest-backup-|\.json$/g, '')) + '</b><small>' + esc(new Date(f.modifiedTime).toLocaleString(locale(), { dateStyle: 'medium', timeStyle: 'short' })) + '</small></span></button>').join('') : '<p class="muted">–</p>';
+    }).catch(() => { const el = $('#restoreDrive'); if (el) el.innerHTML = '<p class="neg">' + t('restoreFail') + '</p>'; });
+  },
+  restorePreview(json, src) {
+    let plan; try { plan = Restore.plan(json); } catch (e) { plan = null; }
+    if (!plan || !Object.keys(plan.recs).length) { UI.toast(t('restoreBad')); return; }
+    if (!plan.count) { UI.toast(t('restoreNothing')); return; }
+    this._plan = plan;
+    this.sheet(t('restoreFromBackup'), '<p>' + esc(t('restorePreview').replace('{n}', localDigits(plan.count)).replace('{src}', src)) + '</p><div class="btns end"><button class="btn" data-act="closeSheet">' + t('cancel') + '</button><button class="btn primary" data-act="restoreApply">' + ic('check', 18) + ' ' + t('restoreConfirm') + '</button></div>');
   },
   dueBadge(days, due) {
     if (days < 0) return '<span class="due over">' + t('dueOver').replace('{n}', localDigits(-days)) + '</span>';
@@ -1856,13 +2228,14 @@ const UI = {
       '<h4>' + t('deposits') + '</h4><div class="chips">' + cats.filter(c => c.type === 'income').map(catChip).join('') + '</div></section>' +
 
       this.dataCard(lastSync) + '<section class="card" id="drivecard">' + this.driveCardInner() + '</section>' +
+      '<section class="card"><div class="card-h"><h3><span class="emo">🗑️</span> ' + t('trashTitle') + '</h3></div><p class="muted xs" style="margin-top:0">' + t('trashHelp') + '</p><div class="btns"><button class="btn" data-act="openTrash">' + t('trashOpen') + (Trash.count() ? ' (' + localDigits(Trash.count()) + ')' : '') + '</button><button class="btn" data-act="openRestore">' + ic('download', 18) + ' ' + t('restoreFromBackup') + '</button></div></section>' +
 
       '<section class="card"><div class="card-h"><h3>' + ic('lock', 20) + ' ' + t('securityLanguage') + '</h3></div>' +
       '<div class="field"><span>' + t('language') + '</span><div class="seg"><button class="' + (Store.d.lang === 'en' ? 'on' : '') + '" data-act="lang" data-l="en">English</button><button class="' + (Store.d.lang === 'bn' ? 'on' : '') + '" data-act="lang" data-l="bn">বাংলা</button></div></div>' +
       '<div class="btns"><button class="btn" data-act="changePin">' + ic('lock', 18) + ' ' + t('changePin') + '</button><button class="btn" data-act="lockNow">' + t('lockNow') + '</button></div></section></div>';
   },
   dataCard(lastSync) {
-    const exports = '<button class="btn" data-act="openReport">' + ic('file', 18) + ' ' + t('reportBtn') + '</button><button class="btn" data-act="exportCSV">' + ic('download', 18) + ' ' + t('exportCSV') + '</button><button class="btn" data-act="exportLoansCSV">' + ic('download', 18) + ' ' + t('exportLoans') + '</button><button class="btn" data-act="exportBackup">' + ic('download', 18) + ' ' + t('backup') + '</button>';
+    const exports = '<button class="btn" data-act="openReport">' + ic('file', 18) + ' ' + t('reportBtn') + '</button><button class="btn" data-act="exportXLSX">' + ic('file', 18) + ' ' + t('exportXLSX') + '</button><button class="btn" data-act="exportCSV">' + ic('download', 18) + ' ' + t('exportCSV') + '</button><button class="btn" data-act="exportLoansCSV">' + ic('download', 18) + ' ' + t('exportLoans') + '</button><button class="btn" data-act="exportBackup">' + ic('download', 18) + ' ' + t('backup') + '</button>';
     if (STANDALONE) return '<section class="card"><div class="card-h"><h3>' + ic('sync', 20) + ' ' + t('phoneData') + '</h3></div><div class="btns" style="margin-top:0">' + exports + '</div><p class="muted xs">' + t('phoneDataSafe') + '</p></section>';
     return '<section class="card"><div class="card-h"><h3>' + ic('sync', 20) + ' ' + t('syncData') + '</h3></div>' +
       '<div class="kv"><span>' + t('status') + '</span><span class="sync-badge"></span></div><div class="kv"><span>' + t('lastSync') + '</span><b>' + esc(lastSync) + '</b></div><div class="kv"><span>' + t('waiting') + '</span><b>' + localDigits(Sync.pending()) + '</b></div>' +
@@ -1961,6 +2334,13 @@ const UI = {
     delWish() { const id = UI.sheetId; if (!confirm(t('confirmDeleteWish'))) return; Store.list('wishsave').filter(e => e.wishId === id).forEach(e => Store.remove('wishsave', e.id)); Store.remove('wish', id); UI.closeSheet(); UI.refresh(); },
     /* lend / borrow */
     openPerson(d) { UI.personId = d.id; UI.page = 'people'; UI.render(); window.scrollTo(0, 0); },
+    goBudget() { const el = $('#budgetcard'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); },
+    openTrash() { UI.trashSheet(); },
+    openRestore() { UI.restoreSheet(); },
+    restoreItem(d) { Trash.restore(d.k, d.id); UI.refresh(); UI.trashSheet(); UI.toast(t('restored')); },
+    async restoreDrive(d) { try { const j = await Drive.loadBackup(d.id); UI.restorePreview(j, d.name.replace(/^moneynest-backup-|\.json$/g, '')); } catch (e) { UI.toast(t('restoreFail')); } },
+    restoreApply() { if (!UI._plan) return; const n = Restore.apply(UI._plan); UI._plan = null; UI.closeSheet(); UI.refresh(); UI.toast(t('restoreDone').replace('{n}', localDigits(n))); },
+    exportXLSX() { exportXLSX(t); },
     toggleTheme() { Theme.toggle(); UI.render(); },
     setTheme(d) { Theme.set(d.m); UI.refresh(); },
     toastAction() { const fn = UI._toastFn; UI._toastFn = null; $('#toast').classList.remove('show'); if (fn) fn(); },
@@ -1979,10 +2359,11 @@ const UI = {
     quickAdd(d) {
       const q = Store.get('quick', d.q), amt = +d.a; if (!q || !(amt > 0)) return;
       const accs = Calc.accounts(), acc = Store.d.lastAcc && accs.some(a => a.id === Store.d.lastAcc) ? Store.d.lastAcc : (accs[0] || {}).id;
-      const id = uid();
+      const id = uid(), before = Calc.catBudgetOne(q.cat, curMonth());
       Store.put('tx', id, { type: 'expense', amount: amt, cat: q.cat, account: acc, date: todayISO(), note: q.name });
       UI.refresh();
-      UI.toast(t('quickAdded').replace('{name}', nm(q)).replace('{amt}', money(amt)), t('undo'), () => { Store.remove('tx', id); UI.refresh(); });
+      const warn = UI.budgetMsg(q.cat, todayISO(), before);
+      UI.toast(t('quickAdded').replace('{name}', nm(q)).replace('{amt}', money(amt)) + (warn ? ' · ' + warn : ''), t('undo'), () => { Store.remove('tx', id); UI.refresh(); }, warn ? 6000 : 0);
     },
     quickOther(d) {
       const q = Store.get('quick', d.q); if (!q) return;
@@ -2050,6 +2431,7 @@ const UI = {
       '<input type="hidden" name="id" value="' + esc(id) + '"><label class="field"><span>' + t('categoryName') + '</span><input name="name" type="text" maxlength="30" value="' + esc(nm(c)) + '" autofocus></label>' +
       (id ? '' : '<div class="field"><span>' + t('type') + '</span><div class="seg"><label class="' + (c.type === 'expense' ? 'on' : '') + '"><input type="radio" name="type" value="expense"' + (c.type === 'expense' ? ' checked' : '') + '> ' + t('expenses') + '</label><label class="' + (c.type === 'income' ? 'on' : '') + '"><input type="radio" name="type" value="income"' + (c.type === 'income' ? ' checked' : '') + '> ' + t('deposits') + '</label></div></div>') +
       emojiPicker(emojiOf(c)) +
+      (c.type === 'expense' ? '<label class="field"><span>' + t('catBudget') + ' (৳)</span><input name="budget" type="text" inputmode="decimal" value="' + (+c.budget > 0 ? inputAmt(c.budget) : '') + '" placeholder="0"></label><p class="muted xs" style="margin-top:-6px">' + t('budgetHint') + '</p>' : '') +
       '<div class="field"><span>' + t('color') + '</span><div class="swatches">' + PALETTE.map(col => '<button type="button" class="swatch' + (c.color === col ? ' on' : '') + '" style="background:' + col + '" data-act="pickColor" data-c="' + col + '" aria-label="' + col + '"></button>').join('') + '</div></div>' +
       '<div class="field"><span>' + t('icon') + '</span><div class="chips pick">' + CAT_ICONS.map(i => '<button type="button" class="chip icononly' + (c.icon === i ? ' on' : '') + '" data-act="pickIcon" data-i="' + i + '">' + ic(i, 18) + '</button>').join('') + '</div></div>',
       t('save'), id ? '<button type="button" class="btn danger" data-act="delCat">' + ic('trash', 18) + ' ' + t('delete') + '</button>' : '');
@@ -2058,6 +2440,7 @@ const UI = {
     const f = $('#sheet form[data-form="cat"]'); if (!f) return;
     this.catDraft.name = f.elements.name.value; this.catDraft.nameBn = '';
     if (f.elements.emoji) this.catDraft.emoji = f.elements.emoji.value.trim();
+    if (f.elements.budget) this.catDraft.budget = f.elements.budget.value;
     const ty = f.querySelector('input[name="type"]:checked'); if (ty) this.catDraft.type = ty.value;
   },
 
@@ -2102,9 +2485,12 @@ const UI = {
       const rec = { type: d.type, amount, account: d.account, date: d.date, note: (d.note || '').trim() };
       if (d.type === 'transfer') rec.to = d.to; else rec.cat = d.cat;
       if (old && old.wishId) rec.wishId = old.wishId;
+      const track = d.type === 'expense' && !rec.wishId;
+      const before = track ? Calc.catBudgetOne(rec.cat, monthOf(rec.date)) : null;
       Store.put('tx', d._id || uid(), rec);
       Store.d.lastAcc = d.account; Store.save();
-      UI.closeSheet(); UI.refresh(); UI.toast(t('saved_ok'));
+      const warn = track ? UI.budgetMsg(rec.cat, rec.date, before) : '';
+      UI.closeSheet(); UI.refresh(); UI.toast(warn || t('saved_ok'), null, null, warn ? 5000 : 0);
     },
     wish(f) {
       const name = f.elements.name.value.trim(), price = parseAmt(f.price.value), err = $('#formerr');
@@ -2181,6 +2567,7 @@ const UI = {
       const id = f.elements.id.value, old = id ? Store.get('category', id) : null;
       const rec = Object.assign({ order: Calc.categories().length }, old || {}, { name: (old && nm(old) === c.name.trim()) ? old.name : c.name.trim(), color: c.color, icon: c.icon, emoji: (c.emoji || '').trim(), type: old ? old.type : c.type });
       if (old && nm(old) !== c.name.trim()) rec.nameBn = '';
+      const bud = parseAmt(c.budget); if (rec.type === 'expense' && bud > 0) rec.budget = bud; else delete rec.budget;
       Store.put('category', id || uid(), rec);
       UI.closeSheet(); UI.refresh();
     }
@@ -2219,6 +2606,12 @@ const UI = {
     document.addEventListener('change', e => {
       const tx = e.target.closest('[data-sett]');
       if (tx) { const s = Calc.settings(); s[tx.dataset.sett] = tx.value.trim(); Store.put('settings', 'main', s); UI.toast(t('saved_ok')); }
+      const rf = e.target.closest('[data-file="restore"]');
+      if (rf && rf.files && rf.files[0]) {
+        const file = rf.files[0], fr = new FileReader();
+        fr.onload = () => { try { UI.restorePreview(JSON.parse(fr.result), file.name); } catch (er) { UI.toast(t('restoreBad')); } };
+        fr.readAsText(file); return;
+      }
       const gl = e.target.closest('[data-sett-local]');
       if (gl) { try { localStorage.setItem('mn_' + gl.dataset.settLocal, gl.value.trim()); } catch (er) { /* ignore */ } UI.refresh(); }
       const el = e.target.closest('[data-set]');
